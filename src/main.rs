@@ -112,6 +112,13 @@ fn next_free_port(conn: &Connection, start_port: u16) -> Result<u16> {
     }
 }
 
+fn service_display(port: u16, scheme: Option<&str>) -> String {
+    match scheme {
+        Some("http") => format!("http://127.0.0.1:{port}/"),
+        _ => port.to_string(),
+    }
+}
+
 fn cmd_allocate(
     worktree: &Path,
     services: &[String],
@@ -193,11 +200,10 @@ fn cmd_allocate(
     std::fs::write(&env_path, lines.join("\n"))
         .with_context(|| format!("failed to write {}", env_path.display()))?;
 
-    println!("Wrote {}", env_path.display());
-    for (service, default_port, _scheme) in &requests {
+    println!("{worktree_str}");
+    for (service, _default_port, scheme) in &requests {
         let port = assignments[service];
-        let flag = if *default_port == port { "" } else { " (reassigned)" };
-        println!("  {service}: {port}{flag}");
+        println!("  {service}: {}", service_display(port, scheme.as_deref()));
     }
 
     Ok(())
@@ -251,11 +257,7 @@ fn cmd_list(glob: Option<&str>) -> Result<()> {
             println!("{worktree}");
             current_wt = worktree.clone();
         }
-        let display = match scheme.as_deref() {
-            Some("http") => format!("http://127.0.0.1:{port}/"),
-            _ => port.to_string(),
-        };
-        println!("  {service}: {display}");
+        println!("  {service}: {}", service_display(*port, scheme.as_deref()));
     }
     Ok(())
 }
