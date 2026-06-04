@@ -72,7 +72,7 @@ fn load_dpcp_yml() -> Result<(Vec<ServiceRequest>, Option<PathBuf>)> {
 }
 
 #[derive(Parser)]
-#[command(name = "dpcp", about = "Dynamic Port Configuration Protocol — host-central port broker for git worktrees")]
+#[command(name = "dpcp", about = "Dynamic Port Configuration Protocol — host-central port broker for working directories")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -80,28 +80,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Allocate ports for a worktree and write .dpcp.env
+    /// Allocate ports for a working directory and write .dpcp.env
     Allocate {
-        /// Absolute path to the worktree
-        worktree: PathBuf,
+        /// Absolute path to the working directory
+        workdir: PathBuf,
         /// Services with their default ports and optional scheme, e.g. postgres:5432 web:3000:http.
         /// If omitted, reads from dpcp.yml in the current directory.
         services: Vec<String>,
-        /// Where to write the env file (defaults to dpcp.yml env-file, then <worktree>/.dpcp.env)
+        /// Where to write the env file (defaults to dpcp.yml env-file, then <workdir>/.dpcp.env)
         #[arg(long)]
         env_file: Option<PathBuf>,
     },
-    /// Release all port allocations for a worktree
+    /// Release all port allocations for a working directory
     Release {
-        /// Absolute path to the worktree
-        worktree: PathBuf,
+        /// Absolute path to the working directory
+        workdir: PathBuf,
     },
-    /// List all current allocations, optionally filtered by glob (use '.' for current worktree)
+    /// List all current allocations, optionally filtered by glob (use '.' for current working directory)
     List {
-        /// Glob pattern to filter worktrees, e.g. '*dpcp*' or '.' for current directory
+        /// Glob pattern to filter working directories, e.g. '*dpcp*' or '.' for current directory
         glob: Option<String>,
     },
-    /// Remove allocations for worktrees whose paths no longer exist
+    /// Remove allocations for working directories whose paths no longer exist
     Gc,
 }
 
@@ -146,14 +146,15 @@ fn open_db() -> Result<Connection> {
         .with_context(|| format!("failed to open {}", path.display()))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS allocations (
-            worktree TEXT NOT NULL,
+            workdir  TEXT NOT NULL,
             service  TEXT NOT NULL,
             port     INTEGER NOT NULL,
-            PRIMARY KEY (worktree, service)
+            PRIMARY KEY (workdir, service)
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_port ON allocations(port);",
     )?;
-    // idempotent migration: add scheme column if not present
+    // idempotent migrations
+    let _ = conn.execute_batch("ALTER TABLE allocations RENAME COLUMN worktree TO workdir");
     let _ = conn.execute_batch("ALTER TABLE allocations ADD COLUMN scheme TEXT");
     Ok(conn)
 }
@@ -187,14 +188,14 @@ fn service_display(port: u16, scheme: Option<&str>) -> String {
 }
 
 fn cmd_allocate(
-    worktree: &Path,
+    workdir: &Path,
     requests: &[ServiceRequest],
     env_file: Option<&Path>,
 ) -> Result<()> {
-    let worktree = worktree
+    let workdir = workdir
         .canonicalize()
-        .with_context(|| format!("worktree path does not exist: {}", worktree.display()))?;
-    let worktree_str = worktree.to_string_lossy();
+        .with_context(|| format!("working directory path does not exist: {}", workdir.display()))?;
+    let workdir_str = workdir.to_string_lossy();
 
     let conn = open_db()?;
 
@@ -203,23 +204,23 @@ fn cmd_allocate(
     for req in requests {
         let existing: Option<u16> = conn
             .query_row(
-                "SELECT port FROM allocations WHERE worktree = ?1 AND service = ?2",
-                params![worktree_str.as_ref(), req.name],
+                "SELECT port FROM allocations WHERE workdir = ?1 AND service = ?2",
+                params![workdir_str.as_ref(), req.name],
                 |row| row.get(0),
             )
             .ok();
 
         let port = if let Some(p) = existing {
             conn.execute(
-                "UPDATE allocations SET scheme = ?1 WHERE worktree = ?2 AND service = ?3",
-                params![req.scheme.as_deref(), worktree_str.as_ref(), req.name],
+                "UPDATE allocations SET scheme = ?1 WHERE workdir = ?2 AND service = ?3",
+                params![req.scheme.as_deref(), workdir_str.as_ref(), req.name],
             )?;
             p
         } else {
             let p = next_free_port(&conn, req.default_port)?;
             conn.execute(
-                "INSERT INTO allocations (worktree, service, port, scheme) VALUES (?1, ?2, ?3, ?4)",
-                params![worktree_str.as_ref(), req.name, p, req.scheme.as_deref()],
+                "INSERT INTO allocations (workdir, service, port, scheme) VALUES (?1, ?2, ?3, ?4)",
+                params![workdir_str.as_ref(), req.name, p, req.scheme.as_deref()],
             )?;
             p
         };
@@ -228,11 +229,11 @@ fn cmd_allocate(
 
     let env_path = env_file
         .map(PathBuf::from)
-        .unwrap_or_else(|| worktree.join(".dpcp.env"));
+        .unwrap_or_else(|| workdir.join(".dpcp.env"));
 
     let mut lines: Vec<String> = vec![
         "# Generated by dpcp — do not edit by hand".to_string(),
-        format!("# Worktree: {worktree_str}"),
+        format!("# Working directory: {workdir_str}"),
     ];
     for req in requests {
         let port = assignments[&req.name];
@@ -254,7 +255,7 @@ fn cmd_allocate(
     std::fs::write(&env_path, lines.join("\n"))
         .with_context(|| format!("failed to write {}", env_path.display()))?;
 
-    println!("{worktree_str}");
+    println!("{workdir_str}");
     for req in requests {
         let port = assignments[&req.name];
         println!("  {}: {}", req.name, service_display(port, req.scheme.as_deref()));
@@ -263,16 +264,16 @@ fn cmd_allocate(
     Ok(())
 }
 
-fn cmd_release(worktree: &Path) -> Result<()> {
-    // Canonicalize if the path still exists; fall back to the raw path for already-deleted worktrees.
-    let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
-    let worktree_str = canonical.to_string_lossy();
+fn cmd_release(workdir: &Path) -> Result<()> {
+    // Canonicalize if the path still exists; fall back to the raw path for already-deleted working directories.
+    let canonical = workdir.canonicalize().unwrap_or_else(|_| workdir.to_path_buf());
+    let workdir_str = canonical.to_string_lossy();
     let conn = open_db()?;
     let deleted = conn.execute(
-        "DELETE FROM allocations WHERE worktree = ?1",
-        params![worktree_str.as_ref()],
+        "DELETE FROM allocations WHERE workdir = ?1",
+        params![workdir_str.as_ref()],
     )?;
-    println!("Released {deleted} allocation(s) for {worktree_str}");
+    println!("Released {deleted} allocation(s) for {workdir_str}");
     Ok(())
 }
 
@@ -288,7 +289,7 @@ fn cmd_list(glob: Option<&str>) -> Result<()> {
 
     let conn = open_db()?;
     let mut stmt = conn.prepare(
-        "SELECT worktree, service, port, scheme FROM allocations ORDER BY worktree, service",
+        "SELECT workdir, service, port, scheme FROM allocations ORDER BY workdir, service",
     )?;
     let rows: Vec<(String, String, u16, Option<String>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
@@ -305,10 +306,10 @@ fn cmd_list(glob: Option<&str>) -> Result<()> {
     }
 
     let mut current_wt = String::new();
-    for (worktree, service, port, scheme) in &filtered {
-        if *worktree != current_wt {
-            println!("{worktree}");
-            current_wt = worktree.clone();
+    for (workdir, service, port, scheme) in &filtered {
+        if *workdir != current_wt {
+            println!("{workdir}");
+            current_wt = workdir.clone();
         }
         println!("  {service}: {}", service_display(*port, scheme.as_deref()));
     }
@@ -318,19 +319,19 @@ fn cmd_list(glob: Option<&str>) -> Result<()> {
 fn cmd_gc() -> Result<()> {
     let conn = open_db()?;
     let mut stmt =
-        conn.prepare("SELECT DISTINCT worktree FROM allocations")?;
-    let worktrees: Vec<String> = stmt
+        conn.prepare("SELECT DISTINCT workdir FROM allocations")?;
+    let workdirs: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
 
     let mut freed = 0usize;
-    for wt in worktrees {
+    for wt in workdirs {
         if !Path::new(&wt).exists() {
             let n = conn.execute(
-                "DELETE FROM allocations WHERE worktree = ?1",
+                "DELETE FROM allocations WHERE workdir = ?1",
                 params![wt],
             )?;
-            println!("GC: removed {n} allocation(s) for missing worktree {wt}");
+            println!("GC: removed {n} allocation(s) for missing working directory {wt}");
             freed += n;
         }
     }
@@ -345,7 +346,7 @@ fn cmd_gc() -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Allocate { worktree, services, env_file } => {
+        Commands::Allocate { workdir, services, env_file } => {
             let (requests, yml_env_file) = if services.is_empty() {
                 load_dpcp_yml().context("no services given and failed to load dpcp.yml")?
             } else {
@@ -355,9 +356,9 @@ fn main() -> Result<()> {
                 (reqs, None)
             };
             let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
-            cmd_allocate(&worktree, &requests, effective_env_file)
+            cmd_allocate(&workdir, &requests, effective_env_file)
         }
-        Commands::Release { worktree } => cmd_release(&worktree),
+        Commands::Release { workdir } => cmd_release(&workdir),
         Commands::List { glob } => cmd_list(glob.as_deref()),
         Commands::Gc => cmd_gc(),
     }
