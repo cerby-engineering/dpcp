@@ -4,6 +4,73 @@ use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(serde::Deserialize)]
+struct DpcpConfig {
+    #[serde(rename = "env-file")]
+    env_file: Option<PathBuf>,
+    ports: HashMap<String, PortConfig>,
+}
+
+#[derive(serde::Deserialize)]
+struct PortConfig {
+    #[serde(rename = "default-port")]
+    default_port: u16,
+    protocol: Option<String>,
+    #[serde(rename = "env-name")]
+    env_name: Option<String>,
+}
+
+struct ServiceRequest {
+    name: String,
+    default_port: u16,
+    scheme: Option<String>,
+    env_name: Option<String>,
+}
+
+impl ServiceRequest {
+    fn from_spec(spec: &str) -> Result<Self> {
+        let parts: Vec<&str> = spec.splitn(3, ':').collect();
+        let (name, port_str, scheme) = match parts.as_slice() {
+            [n, p] => (*n, *p, None),
+            [n, p, s] => (*n, *p, Some(s.to_string())),
+            _ => anyhow::bail!("expected service:port[:scheme], got '{spec}'"),
+        };
+        Ok(ServiceRequest {
+            name: name.to_string(),
+            default_port: port_str.parse().with_context(|| format!("invalid port in '{spec}'"))?,
+            scheme,
+            env_name: None,
+        })
+    }
+
+    fn env_prefix(&self) -> String {
+        self.env_name.as_deref().unwrap_or(&self.name).to_uppercase().replace('-', "_")
+    }
+}
+
+fn load_dpcp_yml() -> Result<(Vec<ServiceRequest>, Option<PathBuf>)> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let path = cwd.join("dpcp.yml");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let config: DpcpConfig = serde_yaml::from_str(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+
+    let mut requests: Vec<ServiceRequest> = config.ports.into_iter()
+        .map(|(name, pc)| ServiceRequest {
+            name,
+            default_port: pc.default_port,
+            scheme: pc.protocol,
+            env_name: pc.env_name,
+        })
+        .collect();
+    requests.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let env_file = config.env_file.map(|p| if p.is_absolute() { p } else { cwd.join(p) });
+
+    Ok((requests, env_file))
+}
+
 #[derive(Parser)]
 #[command(name = "dpcp", about = "Dynamic Port Configuration Protocol — host-central port broker for git worktrees")]
 struct Cli {
@@ -17,10 +84,10 @@ enum Commands {
     Allocate {
         /// Absolute path to the worktree
         worktree: PathBuf,
-        /// Services with their default ports and optional scheme, e.g. postgres:5432 web:3000:http
-        #[arg(required = true)]
+        /// Services with their default ports and optional scheme, e.g. postgres:5432 web:3000:http.
+        /// If omitted, reads from dpcp.yml in the current directory.
         services: Vec<String>,
-        /// Where to write the env file (defaults to <worktree>/.dpcp.env)
+        /// Where to write the env file (defaults to dpcp.yml env-file, then <worktree>/.dpcp.env)
         #[arg(long)]
         env_file: Option<PathBuf>,
     },
@@ -114,14 +181,14 @@ fn next_free_port(conn: &Connection, start_port: u16) -> Result<u16> {
 
 fn service_display(port: u16, scheme: Option<&str>) -> String {
     match scheme {
-        Some("http") => format!("http://127.0.0.1:{port}/"),
+        Some(s @ ("http" | "https")) => format!("{s}://127.0.0.1:{port}/"),
         _ => port.to_string(),
     }
 }
 
 fn cmd_allocate(
     worktree: &Path,
-    services: &[String],
+    requests: &[ServiceRequest],
     env_file: Option<&Path>,
 ) -> Result<()> {
     let worktree = worktree
@@ -131,52 +198,34 @@ fn cmd_allocate(
 
     let conn = open_db()?;
 
-    // Parse service:port[:scheme] triples
-    let mut requests: Vec<(String, u16, Option<String>)> = Vec::new();
-    for spec in services {
-        let parts: Vec<&str> = spec.splitn(3, ':').collect();
-        let (name, port_str, scheme) = match parts.as_slice() {
-            [n, p] => (*n, *p, None),
-            [n, p, s] => (*n, *p, Some(s.to_string())),
-            _ => anyhow::bail!("expected service:port[:scheme], got '{spec}'"),
-        };
-        let default_port: u16 = port_str
-            .parse()
-            .with_context(|| format!("invalid port in '{spec}'"))?;
-        requests.push((name.to_string(), default_port, scheme));
-    }
-
     let mut assignments: HashMap<String, u16> = HashMap::new();
 
-    for (service, default_port, scheme) in &requests {
-        // Re-use existing allocation for this worktree+service if present
+    for req in requests {
         let existing: Option<u16> = conn
             .query_row(
                 "SELECT port FROM allocations WHERE worktree = ?1 AND service = ?2",
-                params![worktree_str.as_ref(), service],
+                params![worktree_str.as_ref(), req.name],
                 |row| row.get(0),
             )
             .ok();
 
         let port = if let Some(p) = existing {
-            // Update scheme in case it changed
             conn.execute(
                 "UPDATE allocations SET scheme = ?1 WHERE worktree = ?2 AND service = ?3",
-                params![scheme.as_deref(), worktree_str.as_ref(), service],
+                params![req.scheme.as_deref(), worktree_str.as_ref(), req.name],
             )?;
             p
         } else {
-            let p = next_free_port(&conn, *default_port)?;
+            let p = next_free_port(&conn, req.default_port)?;
             conn.execute(
                 "INSERT INTO allocations (worktree, service, port, scheme) VALUES (?1, ?2, ?3, ?4)",
-                params![worktree_str.as_ref(), service, p, scheme.as_deref()],
+                params![worktree_str.as_ref(), req.name, p, req.scheme.as_deref()],
             )?;
             p
         };
-        assignments.insert(service.clone(), port);
+        assignments.insert(req.name.clone(), port);
     }
 
-    // Write env file
     let env_path = env_file
         .map(PathBuf::from)
         .unwrap_or_else(|| worktree.join(".dpcp.env"));
@@ -185,18 +234,19 @@ fn cmd_allocate(
         "# Generated by dpcp — do not edit by hand".to_string(),
         format!("# Worktree: {worktree_str}"),
     ];
-    for (service, default_port, scheme) in &requests {
-        let port = assignments[service];
-        let key = format!("{}_PORT", service.to_uppercase().replace('-', "_"));
-        lines.push(format!("{key}={port}"));
-        if *default_port != port {
+    for req in requests {
+        let port = assignments[&req.name];
+        let prefix = req.env_prefix();
+        lines.push(format!("{prefix}_PORT={port}"));
+        if req.default_port != port {
             lines.push(format!(
-                "# ^ {service} default {default_port}, allocated {port}"
+                "# ^ {} default {}, allocated {port}",
+                req.name, req.default_port
             ));
         }
-        if let Some(s) = scheme {
-            let url_key = format!("{}_URL", service.to_uppercase().replace('-', "_"));
-            lines.push(format!("{url_key}={s}://localhost:{port}"));
+        if matches!(req.scheme.as_deref(), Some("http" | "https")) {
+            let scheme = req.scheme.as_deref().unwrap();
+            lines.push(format!("{prefix}_URL={scheme}://localhost:{port}"));
         }
     }
     lines.push(String::new());
@@ -205,9 +255,9 @@ fn cmd_allocate(
         .with_context(|| format!("failed to write {}", env_path.display()))?;
 
     println!("{worktree_str}");
-    for (service, _default_port, scheme) in &requests {
-        let port = assignments[service];
-        println!("  {service}: {}", service_display(port, scheme.as_deref()));
+    for req in requests {
+        let port = assignments[&req.name];
+        println!("  {}: {}", req.name, service_display(port, req.scheme.as_deref()));
     }
 
     Ok(())
@@ -227,7 +277,6 @@ fn cmd_release(worktree: &Path) -> Result<()> {
 }
 
 fn cmd_list(glob: Option<&str>) -> Result<()> {
-    // Resolve '.' to the canonical current directory path
     let resolved_glob: Option<String> = match glob {
         Some(".") => {
             let cwd = std::env::current_dir().context("failed to get current directory")?
@@ -297,7 +346,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Allocate { worktree, services, env_file } => {
-            cmd_allocate(&worktree, &services, env_file.as_deref())
+            let (requests, yml_env_file) = if services.is_empty() {
+                load_dpcp_yml().context("no services given and failed to load dpcp.yml")?
+            } else {
+                let reqs = services.iter()
+                    .map(|s| ServiceRequest::from_spec(s))
+                    .collect::<Result<Vec<_>>>()?;
+                (reqs, None)
+            };
+            let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
+            cmd_allocate(&worktree, &requests, effective_env_file)
         }
         Commands::Release { worktree } => cmd_release(&worktree),
         Commands::List { glob } => cmd_list(glob.as_deref()),
