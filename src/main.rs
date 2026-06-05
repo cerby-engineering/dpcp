@@ -48,8 +48,8 @@ impl ServiceRequest {
     }
 }
 
-fn load_dpcp_yml() -> Result<(Vec<ServiceRequest>, Option<PathBuf>)> {
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
+fn load_dpcp_yml(dir: &Path) -> Result<(Vec<ServiceRequest>, Option<PathBuf>)> {
+    let cwd = dir;
     let path = cwd.join("dpcp.yml");
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -85,7 +85,7 @@ enum Commands {
         /// Absolute path to the working directory
         workdir: PathBuf,
         /// Services with their default ports and optional scheme, e.g. postgres:5432 web:3000:http.
-        /// If omitted, reads from dpcp.yml in the current directory.
+        /// If omitted, reads from dpcp.yml in the working directory.
         services: Vec<String>,
         /// Where to write the env file (defaults to dpcp.yml env-file, then <workdir>/.dpcp.env)
         #[arg(long)]
@@ -348,7 +348,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Allocate { workdir, services, env_file } => {
             let (requests, yml_env_file) = if services.is_empty() {
-                load_dpcp_yml().context("no services given and failed to load dpcp.yml")?
+                load_dpcp_yml(&workdir).context("no services given and failed to load dpcp.yml")?
             } else {
                 let reqs = services.iter()
                     .map(|s| ServiceRequest::from_spec(s))
