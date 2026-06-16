@@ -1,10 +1,11 @@
 # dpcp — Dynamic Port Configuration Protocol
 
-A host-central port broker for working directories. When you have
-multiple working directories running network stacks, dpcp hands each
-one a unique set of host ports, stores the assignments in
-`~/.dpcp.sqlite`, and writes a gitignored `.dpcp.env` file that
-docker-compose, clients, and/or other software read at startup.
+A host-central port broker for working directories. Declare your
+services and default ports in a `dpcp.yml` file, then run
+`dpcp allocate` to get a unique, collision-free set of host ports.
+Assignments are stored in `~/.dpcp.sqlite` and written to a gitignored
+`.dpcp.env` file that docker-compose, clients, and/or other software
+read at startup.
 
 It skips ports already bound on the host (by Docker, bare-metal
 servers, or anything else), so allocations are collision-free even
@@ -78,6 +79,18 @@ MY_SVC_PORT=8081
 
 Idempotent — re-running for an existing working directory returns the
 same ports.
+
+**Without dpcp.yml** — services can be passed directly on the command
+line as `name:default-port[:scheme]`:
+
+```sh
+dpcp allocate . postgres:5432 redis:6379 myservice:8080:http
+```
+
+This is handy for one-off use, but `dpcp.yml` is the recommended
+approach for projects: it keeps the service list version-controlled
+alongside your `docker-compose.yml` and removes the need to repeat the
+port list in every script that calls `dpcp allocate`.
 
 ### release
 
