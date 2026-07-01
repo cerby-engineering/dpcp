@@ -161,7 +161,13 @@ fn open_db() -> Result<Connection> {
 
 fn port_is_bound(port: u16) -> bool {
     use std::net::TcpListener;
+    // macOS/BSD use a "weak host model" for bind conflict checks: a wildcard bind
+    // (0.0.0.0 / ::) does not conflict with a bind already held on a specific address
+    // (e.g. ::1), and vice versa. So a squatter on [::1]:port is only caught by
+    // probing ::1 itself, not by probing the :: wildcard alone.
     TcpListener::bind(("0.0.0.0", port)).is_err()
+        || TcpListener::bind(("::", port)).is_err()
+        || TcpListener::bind(("::1", port)).is_err()
 }
 
 /// Find the lowest port >= start_port not in the dpcp database and not bound on the host.
