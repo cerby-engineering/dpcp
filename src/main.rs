@@ -160,8 +160,19 @@ fn open_db() -> Result<Connection> {
 }
 
 fn port_is_bound(port: u16) -> bool {
+    use std::io::ErrorKind;
     use std::net::TcpListener;
-    TcpListener::bind(("0.0.0.0", port)).is_err()
+    // Rust's std sets SO_REUSEADDR on Unix TcpListeners, which lets a wildcard bind
+    // (0.0.0.0 / ::) coexist with a bind already held on a specific address
+    // (127.0.0.1 / ::1), and vice versa. So a squatter on a specific loopback
+    // address is only caught by probing that address directly, not the wildcard.
+    let in_use = |res: std::io::Result<TcpListener>| {
+        matches!(res, Err(e) if e.kind() == ErrorKind::AddrInUse)
+    };
+    in_use(TcpListener::bind(("0.0.0.0", port)))
+        || in_use(TcpListener::bind(("127.0.0.1", port)))
+        || in_use(TcpListener::bind(("::", port)))
+        || in_use(TcpListener::bind(("::1", port)))
 }
 
 /// Find the lowest port >= start_port not in the dpcp database and not bound on the host.
