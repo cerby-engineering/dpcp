@@ -33,6 +33,10 @@ ports:
     default-port: 8080
     protocol: http          # optional; http or https — emits a full URL in .dpcp.env
     env-name: MY_SVC_PORT   # optional; overrides the generated env var name
+
+env:                        # optional; arbitrary extra vars written as-is to .dpcp.env
+  APP_ENV: local
+  FEATURE_FLAG: "1"
 ```
 
 | Field | Required | Description |
@@ -41,6 +45,7 @@ ports:
 | `ports.<name>.default-port` | yes | Starting port; dpcp increments if taken |
 | `ports.<name>.protocol` | no | `http` or `https` — writes `http://127.0.0.1:<port>/` instead of a bare number |
 | `ports.<name>.env-name` | no | Override the env var name (default: `<NAME>_PORT`) |
+| `env` | no | Map of extra env var name → value, written as-is to `.dpcp.env` |
 | `env-file` | no | Path to write `.dpcp.env` (default: `<workdir>/.dpcp.env`) |
 
 Add `.dpcp.env` to your `.gitignore` — it's host-specific and must not be committed:

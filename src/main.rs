@@ -9,6 +9,8 @@ struct DpcpConfig {
     #[serde(rename = "env-file")]
     env_file: Option<PathBuf>,
     ports: HashMap<String, PortConfig>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -48,7 +50,7 @@ impl ServiceRequest {
     }
 }
 
-fn load_dpcp_yml(dir: &Path) -> Result<(Vec<ServiceRequest>, Option<PathBuf>)> {
+fn load_dpcp_yml(dir: &Path) -> Result<(Vec<ServiceRequest>, Option<PathBuf>, std::collections::BTreeMap<String, String>)> {
     let cwd = dir;
     let path = cwd.join("dpcp.yml");
     let text = std::fs::read_to_string(&path)
@@ -68,7 +70,7 @@ fn load_dpcp_yml(dir: &Path) -> Result<(Vec<ServiceRequest>, Option<PathBuf>)> {
 
     let env_file = config.env_file.map(|p| if p.is_absolute() { p } else { cwd.join(p) });
 
-    Ok((requests, env_file))
+    Ok((requests, env_file, config.env))
 }
 
 #[derive(Parser)]
@@ -202,6 +204,7 @@ fn cmd_allocate(
     workdir: &Path,
     requests: &[ServiceRequest],
     env_file: Option<&Path>,
+    extra_env: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let workdir = workdir
         .canonicalize()
@@ -261,6 +264,15 @@ fn cmd_allocate(
             lines.push(format!("{prefix}_URL={scheme}://localhost:{port}"));
         }
     }
+
+    if !extra_env.is_empty() {
+        lines.push(String::new());
+        lines.push("# Custom environment variables".to_string());
+        for (key, value) in extra_env {
+            lines.push(format!("{key}={value}"));
+        }
+    }
+
     lines.push(String::new());
 
     std::fs::write(&env_path, lines.join("\n"))
@@ -358,16 +370,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Allocate { workdir, services, env_file } => {
-            let (requests, yml_env_file) = if services.is_empty() {
+            let (requests, yml_env_file, extra_env) = if services.is_empty() {
                 load_dpcp_yml(&workdir).context("no services given and failed to load dpcp.yml")?
             } else {
                 let reqs = services.iter()
                     .map(|s| ServiceRequest::from_spec(s))
                     .collect::<Result<Vec<_>>>()?;
-                (reqs, None)
+                (reqs, None, std::collections::BTreeMap::new())
             };
             let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
-            cmd_allocate(&workdir, &requests, effective_env_file)
+            cmd_allocate(&workdir, &requests, effective_env_file, &extra_env)
         }
         Commands::Release { workdir } => cmd_release(&workdir),
         Commands::List { glob } => cmd_list(glob.as_deref()),
