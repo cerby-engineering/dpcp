@@ -34,9 +34,10 @@ ports:
     protocol: http          # optional; http or https — emits a full URL in .dpcp.env
     env-name: MY_SVC_PORT   # optional; overrides the generated env var name
 
-env:                        # optional; arbitrary extra vars written as-is to .dpcp.env
+env:                        # optional; arbitrary extra vars written to .dpcp.env
   APP_ENV: local
   FEATURE_FLAG: "1"
+  WEBAPP_LOCAL_URL: http://app.cerby-local.com:${WEBAPP_PORT}/
 ```
 
 | Field | Required | Description |
@@ -45,8 +46,23 @@ env:                        # optional; arbitrary extra vars written as-is to .d
 | `ports.<name>.default-port` | yes | Starting port; dpcp increments if taken |
 | `ports.<name>.protocol` | no | `http` or `https` — writes `http://127.0.0.1:<port>/` instead of a bare number |
 | `ports.<name>.env-name` | no | Override the env var name (default: `<NAME>_PORT`) |
-| `env` | no | Map of extra env var name → value, written as-is to `.dpcp.env` |
+| `env` | no | Map of extra env var name → value, written to `.dpcp.env` |
 | `env-file` | no | Path to write `.dpcp.env` (default: `<workdir>/.dpcp.env`) |
+
+`env` values may reference `${NAME}` to interpolate a var dpcp already
+computed for a `ports` entry (its `_PORT`, or `_URL` for `http`/`https`
+services). This is handy for a convenience var that combines a fixed
+hostname dpcp doesn't know about with a port it does allocate, e.g. a
+`webapp` service with `default-port: 3001` produces:
+
+```sh
+WEBAPP_PORT=3001
+WEBAPP_LOCAL_URL=http://app.cerby-local.com:3001/
+```
+
+Referencing an unknown name (e.g. a typo) is an error — dpcp won't
+silently leave `${TYPO}` in the output. Values with no `${...}` are
+written as-is, exactly as before.
 
 Add `.dpcp.env` to your `.gitignore` — it's host-specific and must not be committed:
 
