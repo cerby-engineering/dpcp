@@ -51,18 +51,32 @@ already has `env:` interpolation (PR #7) for it.
 Consequence: this is a pure presentation change. No sqlite schema change, no
 new `.dpcp.env` var, and no risk to running services.
 
+**Source: `DPCP_HOSTNAME` environment variable**, with a `--hostname` flag as
+a per-invocation override. Unset means today's behavior, unchanged.
+
+The hostname is a property of *the box dpcp runs on*, not of the project, so
+it belongs at host level:
+
+- `dpcp.yml` is a **committed repo file** (verified). A Tailscale name put
+  there would ship one machine's identity to every clone; the same repo on a
+  laptop wants no hostname at all.
+- `cmd_list` renders allocations across all working directories and never
+  opens any `dpcp.yml`. A host-level env var works for `list` and `allocate`
+  identically, with no sqlite column and no new file format.
+
+Set once per box:
+
+```sh
+# ~/.bashrc on the remote host
+export DPCP_HOSTNAME=earlye-herd-claude.raccoon-wyrm.ts.net
+```
+
+Auto-detection (`tailscale status`, `hostname -f`) was considered and
+rejected: on a multi-homed host there's no principled way to pick between the
+LAN name, the Tailscale name and public DNS, and it's awkward to turn off.
+
 ## Open questions
 
-- Where does the hostname come from? Note `dpcp.yml` is a **committed repo
-  file** (verified), so a machine-specific Tailscale name doesn't belong
-  there — this looks like host-level config, not project-level. Candidates:
-  `DPCP_HOSTNAME` env var, a host-level config file, a `--hostname` flag,
-  or auto-detection.
-- `dpcp list` renders allocations for *all* working directories and never
-  reads their `dpcp.yml`. Whatever the source is, it has to work for `list`
-  too — which further argues for host-level over per-project.
-- Does "possibly per port" survive a display-only scope? What's the concrete
-  case for two services on one box needing different hostnames?
 - Is the existing `127.0.0.1` (display) vs `localhost` (env file) split
   intentional, or a bug to fold into this change?
 
@@ -75,3 +89,4 @@ new `.dpcp.env` var, and no risk to running services.
 ### 2026-09-03
 
 - Q: Should the configurable hostname change `.dpcp.env`'s `_URL` vars, or only terminal output? — A: **Display only.** `_URL` stays `localhost`; the two channels have different audiences, and `env:` interpolation already covers the case for a custom URL in the env file.
+- Q: Where should the display hostname be configured? — A: **`DPCP_HOSTNAME` env var**, plus a `--hostname` per-invocation override. It's host-level, not project-level: `dpcp.yml` is committed to git, and `dpcp list` never reads it. Auto-detection rejected as ambiguous on multi-homed hosts.
