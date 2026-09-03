@@ -76,6 +76,10 @@ fn load_dpcp_yml(dir: &Path) -> Result<(Vec<ServiceRequest>, Option<PathBuf>, st
 #[derive(Parser)]
 #[command(name = "dpcp", about = "Dynamic Port Configuration Protocol — host-central port broker for working directories")]
 struct Cli {
+    /// Hostname to use in printed URLs, e.g. a Tailscale name when dpcp runs on a
+    /// remote box. Defaults to $DPCP_HOSTNAME; pass an empty value to ignore it.
+    #[arg(long, global = true)]
+    hostname: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -193,11 +197,46 @@ fn next_free_port(conn: &Connection, start_port: u16) -> Result<u16> {
     }
 }
 
-fn service_display(port: u16, scheme: Option<&str>) -> String {
-    match scheme {
-        Some(s @ ("http" | "https")) => format!("{s}://127.0.0.1:{port}/"),
-        _ => port.to_string(),
+/// Render an allocation for the terminal. `hostname` is the display host from
+/// `--hostname`/`$DPCP_HOSTNAME`; without one, URLs fall back to loopback and
+/// port-only services stay bare numbers.
+fn service_display(port: u16, scheme: Option<&str>, hostname: Option<&str>) -> String {
+    match (scheme, hostname) {
+        (Some(s @ ("http" | "https")), host) => {
+            format!("{s}://{}:{port}/", host.unwrap_or("127.0.0.1"))
+        }
+        (_, Some(host)) => format!("{host}:{port}"),
+        (_, None) => port.to_string(),
     }
+}
+
+/// Reject a display hostname that already carries a scheme, port or path —
+/// dpcp supplies those itself, so `http://foo:3001` would render as
+/// `http://http://foo:3001:8080/`.
+fn validate_hostname(host: &str) -> Result<()> {
+    if host.contains("://") {
+        anyhow::bail!("hostname must be a bare host, not a URL: {host}");
+    }
+    if host.contains(':') {
+        anyhow::bail!("hostname must not include a port: {host}");
+    }
+    if host.contains('/') {
+        anyhow::bail!("hostname must not include a path: {host}");
+    }
+    Ok(())
+}
+
+/// Resolve the display hostname from the `--hostname` flag, else
+/// `$DPCP_HOSTNAME`. An empty or whitespace-only value means "no hostname",
+/// so `--hostname ""` cancels an inherited `$DPCP_HOSTNAME`.
+fn resolve_hostname(flag: Option<String>) -> Result<Option<String>> {
+    let raw = flag.or_else(|| std::env::var("DPCP_HOSTNAME").ok());
+    let host = match raw {
+        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => return Ok(None),
+    };
+    validate_hostname(&host)?;
+    Ok(Some(host))
 }
 
 /// Substitute `${NAME}` references in `value` with entries from `lookup`.
@@ -228,6 +267,7 @@ fn cmd_allocate(
     requests: &[ServiceRequest],
     env_file: Option<&Path>,
     extra_env: &std::collections::BTreeMap<String, String>,
+    hostname: Option<&str>,
 ) -> Result<()> {
     let workdir = workdir
         .canonicalize()
@@ -286,7 +326,7 @@ fn cmd_allocate(
         }
         if matches!(req.scheme.as_deref(), Some("http" | "https")) {
             let scheme = req.scheme.as_deref().unwrap();
-            let url = format!("{scheme}://localhost:{port}");
+            let url = format!("{scheme}://127.0.0.1:{port}");
             lines.push(format!("{prefix}_URL={url}"));
             var_lookup.insert(format!("{prefix}_URL"), url);
         }
@@ -310,7 +350,7 @@ fn cmd_allocate(
     println!("{workdir_str}");
     for req in requests {
         let port = assignments[&req.name];
-        println!("  {}: {}", req.name, service_display(port, req.scheme.as_deref()));
+        println!("  {}: {}", req.name, service_display(port, req.scheme.as_deref(), hostname));
     }
 
     Ok(())
@@ -329,7 +369,7 @@ fn cmd_release(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(glob: Option<&str>) -> Result<()> {
+fn cmd_list(glob: Option<&str>, hostname: Option<&str>) -> Result<()> {
     let resolved_glob: Option<String> = match glob {
         Some(".") => {
             let cwd = std::env::current_dir().context("failed to get current directory")?
@@ -363,7 +403,7 @@ fn cmd_list(glob: Option<&str>) -> Result<()> {
             println!("{workdir}");
             current_wt = workdir.clone();
         }
-        println!("  {service}: {}", service_display(*port, scheme.as_deref()));
+        println!("  {service}: {}", service_display(*port, scheme.as_deref(), hostname));
     }
     Ok(())
 }
@@ -397,6 +437,8 @@ fn cmd_gc() -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let hostname = resolve_hostname(cli.hostname)?;
+    let hostname = hostname.as_deref();
     match cli.command {
         Commands::Allocate { workdir, services, env_file } => {
             let (requests, yml_env_file, extra_env) = if services.is_empty() {
@@ -408,10 +450,10 @@ fn main() -> Result<()> {
                 (reqs, None, std::collections::BTreeMap::new())
             };
             let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
-            cmd_allocate(&workdir, &requests, effective_env_file, &extra_env)
+            cmd_allocate(&workdir, &requests, effective_env_file, &extra_env, hostname)
         }
         Commands::Release { workdir } => cmd_release(&workdir),
-        Commands::List { glob } => cmd_list(glob.as_deref()),
+        Commands::List { glob } => cmd_list(glob.as_deref(), hostname),
         Commands::Gc => cmd_gc(),
     }
 }
@@ -460,5 +502,38 @@ mod tests {
     fn interpolate_errors_on_unterminated_brace() {
         let lookup = HashMap::new();
         assert!(interpolate_env_value("${OOPS", &lookup).is_err());
+    }
+
+    #[test]
+    fn service_display_covers_scheme_and_hostname_combinations() {
+        let host = Some("box.ts.net");
+        let cases = [
+            (Some("http"), host, "http://box.ts.net:8080/"),
+            (Some("https"), host, "https://box.ts.net:8080/"),
+            (Some("http"), None, "http://127.0.0.1:8080/"),
+            (None, host, "box.ts.net:8080"),
+            (None, None, "8080"),
+        ];
+        for (scheme, hostname, expected) in cases {
+            assert_eq!(service_display(8080, scheme, hostname), expected);
+        }
+    }
+
+    #[test]
+    fn validate_hostname_rejects_scheme_port_and_path() {
+        assert!(validate_hostname("http://foo").is_err());
+        assert!(validate_hostname("foo:3001").is_err());
+        assert!(validate_hostname("foo/bar").is_err());
+        assert!(validate_hostname("foo.ts.net").is_ok());
+    }
+
+    #[test]
+    fn resolve_hostname_treats_empty_flag_as_unset() {
+        assert_eq!(resolve_hostname(Some(String::new())).unwrap(), None);
+        assert_eq!(resolve_hostname(Some("   ".to_string())).unwrap(), None);
+        assert_eq!(
+            resolve_hostname(Some(" foo.ts.net ".to_string())).unwrap(),
+            Some("foo.ts.net".to_string())
+        );
     }
 }

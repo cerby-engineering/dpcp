@@ -44,7 +44,7 @@ env:                        # optional; arbitrary extra vars written to .dpcp.en
 |---|---|---|
 | `ports` | yes | Map of service name → port config |
 | `ports.<name>.default-port` | yes | Starting port; dpcp increments if taken |
-| `ports.<name>.protocol` | no | `http` or `https` — writes `http://127.0.0.1:<port>/` instead of a bare number |
+| `ports.<name>.protocol` | no | `http` or `https` — emits a `<NAME>_URL` alongside `<NAME>_PORT`, and prints a full URL instead of a bare number |
 | `ports.<name>.env-name` | no | Override the env var name (default: `<NAME>_PORT`) |
 | `env` | no | Map of extra env var name → value, written to `.dpcp.env` |
 | `env-file` | no | Path to write `.dpcp.env` (default: `<workdir>/.dpcp.env`) |
@@ -78,6 +78,9 @@ dpcp release  <workdir>
 dpcp list
 dpcp gc
 ```
+
+All subcommands accept `--hostname <host>`; see
+[Remote hosts](#remote-hosts) below.
 
 ### allocate
 
@@ -140,6 +143,44 @@ Removes allocations for working directories whose paths no longer
 exist on disk. Run this periodically if you delete working directories
 without calling `release`. (For example, upon exiting a `claude
 --worktree` session).
+
+## Remote hosts
+
+By default dpcp prints loopback URLs — `http://127.0.0.1:8080/`. When dpcp
+runs on a box you reach over SSH or Tailscale, those aren't clickable from
+the machine you're sitting at. Set `DPCP_HOSTNAME` on that box:
+
+```sh
+# ~/.bashrc on the remote host
+export DPCP_HOSTNAME=my-box.example.ts.net
+```
+
+```sh
+$ dpcp list
+/home/me/myproject
+  myservice: http://my-box.example.ts.net:8081/
+  postgres:  my-box.example.ts.net:5432
+```
+
+Services with a `protocol:` render as full URLs; services without one render
+as `host:port` so the connection string can be copied straight out. With no
+hostname set, both keep their previous form (`http://127.0.0.1:8081/` and a
+bare `5432`).
+
+`--hostname <host>` overrides the variable for a single invocation, and
+`--hostname ""` ignores an inherited one. The value must be a bare host —
+no scheme, port or path.
+
+This affects **printed output only**. The `<NAME>_URL` written to `.dpcp.env`
+always stays on loopback, because it's consumed by processes running on the
+dpcp host itself, where routing out to a public name and back would be slower
+and would fail outright from inside a container. If you need a non-loopback
+URL in the env file, write one with [`env:` interpolation](#dpcpyml).
+
+The hostname is deliberately *not* a `dpcp.yml` field: `dpcp.yml` is
+committed to the repo, and the reachable name of a machine is a property of
+that machine, not of the project. See
+[ADR 0001](docs/adr/0001-host-level-config-outside-dpcp-yml.md).
 
 ## Wiring up a bare-metal application
 
