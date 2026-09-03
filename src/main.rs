@@ -234,37 +234,59 @@ fn validate_hostname(host: &str) -> Result<()> {
     if !host.chars().all(host_char) {
         anyhow::bail!("hostname may only contain letters, digits, '.', '-' and '_': {host}");
     }
+    // A single trailing dot is the legal root form of an FQDN; anything else
+    // empty between the dots is a typo, as is a host with nothing to resolve.
+    let labels = host.strip_suffix('.').unwrap_or(host);
+    if labels.is_empty() || labels.split('.').any(|l| l.is_empty()) {
+        anyhow::bail!("hostname has an empty label: {host}");
+    }
+    if !host.chars().any(|c| c.is_ascii_alphanumeric()) {
+        anyhow::bail!("hostname must contain at least one letter or digit: {host}");
+    }
     Ok(())
+}
+
+/// Bracket a bare IPv6 address so `--hostname "$(tailscale ip -6)"` works —
+/// `fd7a::1` only renders as a usable URL once it's `[fd7a::1]`.
+fn normalize_hostname(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 /// Resolve the display hostname from the `--hostname` flag, else
 /// `$DPCP_HOSTNAME`. An empty or whitespace-only value means "no hostname",
 /// so `--hostname ""` cancels an inherited `$DPCP_HOSTNAME`.
-fn resolve_hostname(flag: Option<String>) -> Result<Option<String>> {
+fn resolve_hostname(flag: Option<String>) -> Option<String> {
     resolve_hostname_from(flag, std::env::var("DPCP_HOSTNAME").ok())
 }
 
 /// The env-independent half of [`resolve_hostname`], so both branches are
 /// testable without mutating the process environment.
 ///
-/// An explicit flag is a deliberate act in this invocation, so a bad value is
-/// an error. A bad environment variable only warns and falls back to loopback:
-/// the hostname affects printed text alone, and a typo in a shell profile must
-/// not stop `dpcp allocate` from allocating.
-fn resolve_hostname_from(flag: Option<String>, env: Option<String>) -> Result<Option<String>> {
-    let from_flag = flag.is_some();
-    let host = match flag.or(env) {
-        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
-        _ => return Ok(None),
+/// A bad value warns on stderr and falls back to loopback rather than failing.
+/// The hostname affects printed text alone, so neither a typo in a shell
+/// profile nor a `--hostname "$(tailscale ip -6)"` that produced something
+/// unexpected should stop `dpcp allocate` from allocating.
+fn resolve_hostname_from(flag: Option<String>, env: Option<String>) -> Option<String> {
+    let (source, raw) = match (flag, env) {
+        (Some(h), _) => ("--hostname", h),
+        (None, Some(h)) => ("$DPCP_HOSTNAME", h),
+        (None, None) => return None,
     };
-    if let Err(e) = validate_hostname(&host) {
-        if from_flag {
-            return Err(e);
-        }
-        eprintln!("warning: ignoring $DPCP_HOSTNAME, falling back to loopback — {e}");
-        return Ok(None);
+    let host = normalize_hostname(raw.trim());
+    if host.is_empty() {
+        return None;
     }
-    Ok(Some(host))
+    match validate_hostname(&host) {
+        Ok(()) => Some(host),
+        Err(e) => {
+            eprintln!("warning: ignoring {source}, falling back to loopback — {e}");
+            None
+        }
+    }
 }
 
 /// Substitute `${NAME}` references in `value` with entries from `lookup`.
@@ -476,13 +498,13 @@ fn main() -> Result<()> {
                 (reqs, None, std::collections::BTreeMap::new())
             };
             let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
-            let hostname = resolve_hostname(cli.hostname)?;
+            let hostname = resolve_hostname(cli.hostname);
             let hostname = hostname.as_deref();
             cmd_allocate(&workdir, &requests, effective_env_file, &extra_env, hostname)
         }
         Commands::Release { workdir } => cmd_release(&workdir),
         Commands::List { glob } => {
-            let hostname = resolve_hostname(cli.hostname)?;
+            let hostname = resolve_hostname(cli.hostname);
             cmd_list(glob.as_deref(), hostname.as_deref())
         }
         Commands::Gc => cmd_gc(),
@@ -559,6 +581,7 @@ mod tests {
             "[::1]",
             "[fd7a:115c:a1e0::1]",
             "[::ffff:1.2.3.4]", // IPv4-mapped
+            "foo.ts.net.",      // trailing dot is the legal FQDN root form
         ] {
             assert!(validate_hostname(good).is_ok(), "{good} should be accepted");
         }
@@ -577,6 +600,11 @@ mod tests {
             "[nope]",     // not an address
             "[1.2.3.4]",  // IPv4 in brackets — curl and browsers reject it
             "[::1::2]",   // two elisions
+            ".",          // nothing to resolve
+            "..",
+            "-",
+            "_",
+            "foo..bar", // empty label
         ] {
             assert!(validate_hostname(bad).is_err(), "{bad} should be rejected");
         }
@@ -588,31 +616,38 @@ mod tests {
         // through to it.
         let env = || Some("inherited.ts.net".to_string());
         for empty in ["", "   "] {
-            let got = resolve_hostname_from(Some(empty.to_string()), env()).unwrap();
+            let got = resolve_hostname_from(Some(empty.to_string()), env());
             assert_eq!(got, None, "{empty:?} should cancel the env var");
         }
         assert_eq!(
-            resolve_hostname_from(Some(" foo.ts.net ".to_string()), None).unwrap(),
+            resolve_hostname_from(Some(" foo.ts.net ".to_string()), None),
             Some("foo.ts.net".to_string())
         );
     }
 
     #[test]
-    fn resolve_hostname_fails_on_bad_flag_but_degrades_on_bad_env() {
+    fn resolve_hostname_degrades_to_loopback_on_a_bad_value() {
+        // Whatever the source: printing is not worth failing an allocation over.
         let bad = "http://box".to_string();
-        // Explicit and deliberate: fail loudly.
-        assert!(resolve_hostname_from(Some(bad.clone()), None).is_err());
-        // Inherited from a shell profile: a display-only typo must not stop
-        // `dpcp allocate` from allocating.
-        assert_eq!(resolve_hostname_from(None, Some(bad)).unwrap(), None);
+        assert_eq!(resolve_hostname_from(Some(bad.clone()), None), None);
+        assert_eq!(resolve_hostname_from(None, Some(bad)), None);
     }
 
     #[test]
     fn resolve_hostname_falls_back_to_env() {
         assert_eq!(
-            resolve_hostname_from(None, Some("box.ts.net".to_string())).unwrap(),
+            resolve_hostname_from(None, Some("box.ts.net".to_string())),
             Some("box.ts.net".to_string())
         );
-        assert_eq!(resolve_hostname_from(None, None).unwrap(), None);
+        assert_eq!(resolve_hostname_from(None, None), None);
+    }
+
+    #[test]
+    fn resolve_hostname_brackets_a_bare_ipv6_address() {
+        // `--hostname "$(tailscale ip -6)"` hands us an unbracketed address.
+        assert_eq!(
+            resolve_hostname_from(Some("fd7a:115c:a1e0::1".to_string()), None),
+            Some("[fd7a:115c:a1e0::1]".to_string())
+        );
     }
 }

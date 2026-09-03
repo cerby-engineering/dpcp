@@ -172,10 +172,13 @@ bare `5432`).
 letters, digits, `.`, `-` and `_`, with no scheme, port or path. An IPv6
 literal is written bracketed, `[fd7a:115c:a1e0::1]`.
 
-An invalid `--hostname` is an error, since passing it is deliberate. An invalid
-`$DPCP_HOSTNAME` only warns on stderr and falls back to loopback — a typo in a
-shell profile shouldn't stop `dpcp allocate` from allocating over a setting
-that affects printed text alone:
+A bare IPv6 address is bracketed automatically, so
+`--hostname "$(tailscale ip -6)"` works as written.
+
+An invalid value — from either source — warns on stderr and falls back to
+loopback rather than failing. The hostname affects printed text alone, so
+neither a typo in a shell profile nor a command substitution that produced
+something unexpected should stop `dpcp allocate` from allocating:
 
 ```sh
 $ DPCP_HOSTNAME=http://my-box.ts.net dpcp allocate .
