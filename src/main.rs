@@ -210,18 +210,30 @@ fn service_display(port: u16, scheme: Option<&str>, hostname: Option<&str>) -> S
     }
 }
 
-/// Reject a display hostname that already carries a scheme, port or path —
-/// dpcp supplies those itself, so `http://foo:3001` would render as
-/// `http://http://foo:3001:8080/`.
+/// Require a display hostname to be a bare host. dpcp supplies the scheme, port
+/// and trailing slash itself, so `http://foo:3001` would render as
+/// `http://http://foo:3001:8080/`. Characters outside the host charset are
+/// rejected too: `http://foo?x:8080/` is a valid URL that a terminal linkifies
+/// to host `foo` on port 80, which fails silently rather than loudly.
 fn validate_hostname(host: &str) -> Result<()> {
     if host.contains("://") {
         anyhow::bail!("hostname must be a bare host, not a URL: {host}");
     }
-    if host.contains(':') {
-        anyhow::bail!("hostname must not include a port: {host}");
+    // A bracketed IPv6 literal is the one form allowed to contain colons; it
+    // also renders correctly as-is, since `[::1]:8080` is the standard form.
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        let ipv6ish = |c: char| c.is_ascii_hexdigit() || c == ':' || c == '.';
+        if inner.is_empty() || !inner.chars().all(ipv6ish) {
+            anyhow::bail!("hostname is not a valid bracketed IPv6 literal: {host}");
+        }
+        return Ok(());
     }
-    if host.contains('/') {
-        anyhow::bail!("hostname must not include a path: {host}");
+    if host.contains(':') {
+        anyhow::bail!("hostname must not include a port (bracket IPv6 as [::1]): {host}");
+    }
+    let host_char = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
+    if !host.chars().all(host_char) {
+        anyhow::bail!("hostname may only contain letters, digits, '.' and '-': {host}");
     }
     Ok(())
 }
@@ -437,8 +449,6 @@ fn cmd_gc() -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let hostname = resolve_hostname(cli.hostname)?;
-    let hostname = hostname.as_deref();
     match cli.command {
         Commands::Allocate { workdir, services, env_file } => {
             let (requests, yml_env_file, extra_env) = if services.is_empty() {
@@ -450,10 +460,15 @@ fn main() -> Result<()> {
                 (reqs, None, std::collections::BTreeMap::new())
             };
             let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
+            let hostname = resolve_hostname(cli.hostname)?;
+            let hostname = hostname.as_deref();
             cmd_allocate(&workdir, &requests, effective_env_file, &extra_env, hostname)
         }
         Commands::Release { workdir } => cmd_release(&workdir),
-        Commands::List { glob } => cmd_list(glob.as_deref(), hostname),
+        Commands::List { glob } => {
+            let hostname = resolve_hostname(cli.hostname)?;
+            cmd_list(glob.as_deref(), hostname.as_deref())
+        }
         Commands::Gc => cmd_gc(),
     }
 }
@@ -520,11 +535,27 @@ mod tests {
     }
 
     #[test]
-    fn validate_hostname_rejects_scheme_port_and_path() {
-        assert!(validate_hostname("http://foo").is_err());
-        assert!(validate_hostname("foo:3001").is_err());
-        assert!(validate_hostname("foo/bar").is_err());
+    fn validate_hostname_accepts_bare_hosts_and_bracketed_ipv6() {
         assert!(validate_hostname("foo.ts.net").is_ok());
+        assert!(validate_hostname("my-box").is_ok());
+        assert!(validate_hostname("[::1]").is_ok());
+        assert!(validate_hostname("[fd7a:115c:a1e0::1]").is_ok());
+    }
+
+    #[test]
+    fn validate_hostname_rejects_anything_that_would_corrupt_a_url() {
+        for bad in [
+            "http://foo", // scheme
+            "foo:3001",   // port
+            "foo/bar",    // path
+            "foo?x",      // query — would linkify as host `foo` on port 80
+            "foo#y",      // fragment
+            "my box",     // whitespace
+            "[]",         // empty IPv6 literal
+            "[nope]",     // not hex
+        ] {
+            assert!(validate_hostname(bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]

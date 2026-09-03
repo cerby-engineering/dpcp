@@ -67,7 +67,7 @@ set, so a `psql`/`redis-cli` connection string can be copied straight out:
 ```
 $ dpcp list
 /home/ec2-user/c3
-  webapp:   http://earlye-herd-claude.raccoon-wyrm.ts.net:3001/
+  webapp: http://earlye-herd-claude.raccoon-wyrm.ts.net:3001/
   postgres: earlye-herd-claude.raccoon-wyrm.ts.net:5432
 ```
 
