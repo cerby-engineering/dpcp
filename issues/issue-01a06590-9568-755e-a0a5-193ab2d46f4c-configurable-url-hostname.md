@@ -30,14 +30,48 @@ which is itself an inconsistency this issue should probably resolve:
 - `src/main.rs:31` — `ServiceRequest::from_spec` parses the `name:port[:scheme]` CLI form; a hostname would need a place in that grammar too
 - `README.md` — documents `dpcp.yml` fields and shows the emitted URL format
 
+## Decisions
+
+**Scope: display only.** The configurable hostname changes what `dpcp allocate`
+and `dpcp list` *print*. The `<PREFIX>_URL` var written to `.dpcp.env` is
+untouched and keeps its current `localhost` form.
+
+The two channels have different audiences and want different answers:
+
+| Channel | Audience | Wants |
+|---|---|---|
+| Terminal output | A human, at a *different* machine over SSH | The reachable name |
+| `<PREFIX>_URL` in `.dpcp.env` | Processes on the dpcp host (docker-compose, clients) | `localhost` |
+
+Pointing `_URL` at a Tailscale name would route host-local traffic out and
+back, and would break outright from inside a container or with tailscaled
+down. Anyone who genuinely wants a non-loopback URL in their env file
+already has `env:` interpolation (PR #7) for it.
+
+Consequence: this is a pure presentation change. No sqlite schema change, no
+new `.dpcp.env` var, and no risk to running services.
+
 ## Open questions
 
-- Global default hostname, per-port override, or both?
-- Config-file field, CLI flag, environment variable, or auto-detect (e.g. hostname of the box / Tailscale name)?
-- Does the hostname affect only display, or also the `_URL` var written to `.dpcp.env` (which downstream services consume)? These may want to differ — a container may need `localhost` while a human needs the Tailscale name.
-- Is the existing `127.0.0.1` vs `localhost` split intentional, or a bug to fold into this change?
-- Should the hostname be persisted in the sqlite allocation row (like `scheme` is), so `dpcp list` can render it for working directories whose `dpcp.yml` isn't re-read?
+- Where does the hostname come from? Note `dpcp.yml` is a **committed repo
+  file** (verified), so a machine-specific Tailscale name doesn't belong
+  there — this looks like host-level config, not project-level. Candidates:
+  `DPCP_HOSTNAME` env var, a host-level config file, a `--hostname` flag,
+  or auto-detection.
+- `dpcp list` renders allocations for *all* working directories and never
+  reads their `dpcp.yml`. Whatever the source is, it has to work for `list`
+  too — which further argues for host-level over per-project.
+- Does "possibly per port" survive a display-only scope? What's the concrete
+  case for two services on one box needing different hostnames?
+- Is the existing `127.0.0.1` (display) vs `localhost` (env file) split
+  intentional, or a bug to fold into this change?
 
 ## Related
 
 - The `env:` interpolation feature (PR #6/#7) already lets a user hand-write a URL with a fixed hostname, e.g. `WEBAPP_LOCAL_URL: http://app.cerby-local.com:${WEBAPP_PORT}/` — that's the current workaround, and overlaps with what this issue proposes to make first-class.
+
+## Grill Log
+
+### 2026-09-03
+
+- Q: Should the configurable hostname change `.dpcp.env`'s `_URL` vars, or only terminal output? — A: **Display only.** `_URL` stays `localhost`; the two channels have different audiences, and `env:` interpolation already covers the case for a custom URL in the env file.
