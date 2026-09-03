@@ -266,7 +266,8 @@ fn resolve_hostname(flag: Option<String>) -> Option<String> {
 /// The env-independent half of [`resolve_hostname`], so both branches are
 /// testable without mutating the process environment.
 ///
-/// A bad value warns on stderr and falls back to loopback rather than failing.
+/// A bad value warns on stderr and falls back to the default output rather
+/// than failing.
 /// The hostname affects printed text alone, so neither a typo in a shell
 /// profile nor a `--hostname "$(tailscale ip -6)"` that produced something
 /// unexpected should stop `dpcp allocate` from allocating.
@@ -283,7 +284,7 @@ fn resolve_hostname_from(flag: Option<String>, env: Option<String>) -> Option<St
     match validate_hostname(&host) {
         Ok(()) => Some(host),
         Err(e) => {
-            eprintln!("warning: ignoring {source}, falling back to loopback — {e}");
+            eprintln!("warning: ignoring {source}, falling back to default output — {e}");
             None
         }
     }

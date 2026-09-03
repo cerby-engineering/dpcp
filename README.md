@@ -175,14 +175,14 @@ literal is written bracketed, `[fd7a:115c:a1e0::1]`.
 A bare IPv6 address is bracketed automatically, so
 `--hostname "$(tailscale ip -6)"` works as written.
 
-An invalid value — from either source — warns on stderr and falls back to
-loopback rather than failing. The hostname affects printed text alone, so
+An invalid value — from either source — warns on stderr and falls back to the
+default output rather than failing. The hostname affects printed text alone, so
 neither a typo in a shell profile nor a command substitution that produced
 something unexpected should stop `dpcp allocate` from allocating:
 
 ```sh
 $ DPCP_HOSTNAME=http://my-box.ts.net dpcp allocate .
-warning: ignoring $DPCP_HOSTNAME, falling back to loopback — hostname must be a bare host, not a URL: http://my-box.ts.net
+warning: ignoring $DPCP_HOSTNAME, falling back to default output — hostname must be a bare host, not a URL: http://my-box.ts.net
 /home/me/myproject
   myservice: http://127.0.0.1:8081/
 ```
@@ -204,7 +204,7 @@ committed to the repo, and the reachable name of a machine is a property of
 that machine, not of the project. See
 [ADR 0001](docs/adr/0001-host-level-config-outside-dpcp-yml.md).
 
-### `_URL` now uses `127.0.0.1`, not `localhost`
+### `_URL` now uses `127.0.0.1`, not `localhost` (0.2.0)
 
 Separately from the above, `<NAME>_URL` in `.dpcp.env` changed from
 `http://localhost:<port>` to `http://127.0.0.1:<port>`, so it matches what
