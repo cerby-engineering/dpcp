@@ -221,14 +221,24 @@ fn validate_hostname(host: &str) -> Result<()> {
     }
     // A bracketed IPv6 literal is the one form allowed to contain colons; it
     // also renders correctly as-is, since `[::1]:8080` is the standard form.
-    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        if inner.parse::<std::net::Ipv6Addr>().is_err() {
-            anyhow::bail!("hostname is not a valid bracketed IPv6 literal: {host}");
+    if host.starts_with('[') || host.ends_with(']') {
+        let addr = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .and_then(|inner| inner.parse::<std::net::Ipv6Addr>().ok())
+            .with_context(|| format!("hostname is not a valid bracketed IPv6 literal: {host}"))?;
+        if addr.is_unspecified() {
+            anyhow::bail!("hostname must be reachable, not a wildcard bind address: {host}");
         }
         return Ok(());
     }
     if host.contains(':') {
         anyhow::bail!("hostname must not include a port (bracket IPv6 as [::1]): {host}");
+    }
+    // `0.0.0.0` is a plausible copy-paste out of a listen config, but a
+    // wildcard bind address is not a name anything can connect to.
+    if host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_unspecified()) {
+        anyhow::bail!("hostname must be reachable, not a wildcard bind address: {host}");
     }
     let host_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
     if !host.chars().all(host_char) {
@@ -239,6 +249,11 @@ fn validate_hostname(host: &str) -> Result<()> {
     let labels = host.strip_suffix('.').unwrap_or(host);
     if labels.is_empty() || labels.split('.').any(|l| l.is_empty()) {
         anyhow::bail!("hostname has an empty label: {host}");
+    }
+    // RFC 1123: a label may contain hyphens but must not begin or end with one.
+    let hyphen_edged = |l: &str| l.starts_with('-') || l.ends_with('-');
+    if labels.split('.').any(hyphen_edged) {
+        anyhow::bail!("hostname label must not start or end with '-': {host}");
     }
     if !host.chars().any(|c| c.is_ascii_alphanumeric()) {
         anyhow::bail!("hostname must contain at least one letter or digit: {host}");
@@ -601,7 +616,12 @@ mod tests {
             "[nope]",     // not an address
             "[1.2.3.4]",  // IPv4 in brackets — curl and browsers reject it
             "[::1::2]",   // two elisions
-            ".",          // nothing to resolve
+            "0.0.0.0",    // wildcard bind address, not a name
+            "[::]",
+            "-box", // RFC 1123: no hyphen at a label edge
+            "box-",
+            "foo.-bar.baz",
+            ".", // nothing to resolve
             "..",
             "-",
             "_",

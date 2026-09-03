@@ -190,6 +190,12 @@ warning: ignoring $DPCP_HOSTNAME, falling back to default output — hostname mu
 `release` and `gc` print no URLs, so they accept `--hostname` (it's a global
 flag, convenient for scripts that pass it uniformly) and ignore it.
 
+**If a script parses dpcp's output**, note that setting `DPCP_HOSTNAME` in a
+shell profile changes it for every caller on that box: a protocol-less service
+goes from a bare `5432` to `box.ts.net:5432`. Pass `--hostname ""` in scripts
+that read the port back, or read `.dpcp.env`, which never carries the
+hostname.
+
 This affects **printed output only**. The `<NAME>_URL` written to `.dpcp.env`
 always stays on loopback, because it's consumed by processes running on the
 dpcp host itself, where routing out to a public name and back would be slower
