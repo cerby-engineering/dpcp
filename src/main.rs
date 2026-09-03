@@ -222,8 +222,7 @@ fn validate_hostname(host: &str) -> Result<()> {
     // A bracketed IPv6 literal is the one form allowed to contain colons; it
     // also renders correctly as-is, since `[::1]:8080` is the standard form.
     if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        let ipv6ish = |c: char| c.is_ascii_hexdigit() || c == ':' || c == '.';
-        if inner.is_empty() || !inner.chars().all(ipv6ish) {
+        if inner.parse::<std::net::Ipv6Addr>().is_err() {
             anyhow::bail!("hostname is not a valid bracketed IPv6 literal: {host}");
         }
         return Ok(());
@@ -231,9 +230,9 @@ fn validate_hostname(host: &str) -> Result<()> {
     if host.contains(':') {
         anyhow::bail!("hostname must not include a port (bracket IPv6 as [::1]): {host}");
     }
-    let host_char = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
+    let host_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
     if !host.chars().all(host_char) {
-        anyhow::bail!("hostname may only contain letters, digits, '.' and '-': {host}");
+        anyhow::bail!("hostname may only contain letters, digits, '.', '-' and '_': {host}");
     }
     Ok(())
 }
@@ -242,12 +241,29 @@ fn validate_hostname(host: &str) -> Result<()> {
 /// `$DPCP_HOSTNAME`. An empty or whitespace-only value means "no hostname",
 /// so `--hostname ""` cancels an inherited `$DPCP_HOSTNAME`.
 fn resolve_hostname(flag: Option<String>) -> Result<Option<String>> {
-    let raw = flag.or_else(|| std::env::var("DPCP_HOSTNAME").ok());
-    let host = match raw {
+    resolve_hostname_from(flag, std::env::var("DPCP_HOSTNAME").ok())
+}
+
+/// The env-independent half of [`resolve_hostname`], so both branches are
+/// testable without mutating the process environment.
+///
+/// An explicit flag is a deliberate act in this invocation, so a bad value is
+/// an error. A bad environment variable only warns and falls back to loopback:
+/// the hostname affects printed text alone, and a typo in a shell profile must
+/// not stop `dpcp allocate` from allocating.
+fn resolve_hostname_from(flag: Option<String>, env: Option<String>) -> Result<Option<String>> {
+    let from_flag = flag.is_some();
+    let host = match flag.or(env) {
         Some(h) if !h.trim().is_empty() => h.trim().to_string(),
         _ => return Ok(None),
     };
-    validate_hostname(&host)?;
+    if let Err(e) = validate_hostname(&host) {
+        if from_flag {
+            return Err(e);
+        }
+        eprintln!("warning: ignoring $DPCP_HOSTNAME, falling back to loopback — {e}");
+        return Ok(None);
+    }
     Ok(Some(host))
 }
 
@@ -536,10 +552,16 @@ mod tests {
 
     #[test]
     fn validate_hostname_accepts_bare_hosts_and_bracketed_ipv6() {
-        assert!(validate_hostname("foo.ts.net").is_ok());
-        assert!(validate_hostname("my-box").is_ok());
-        assert!(validate_hostname("[::1]").is_ok());
-        assert!(validate_hostname("[fd7a:115c:a1e0::1]").is_ok());
+        for good in [
+            "foo.ts.net",
+            "my-box",
+            "my_box.local", // '_' is common in compose aliases and /etc/hosts
+            "[::1]",
+            "[fd7a:115c:a1e0::1]",
+            "[::ffff:1.2.3.4]", // IPv4-mapped
+        ] {
+            assert!(validate_hostname(good).is_ok(), "{good} should be accepted");
+        }
     }
 
     #[test]
@@ -552,7 +574,9 @@ mod tests {
             "foo#y",      // fragment
             "my box",     // whitespace
             "[]",         // empty IPv6 literal
-            "[nope]",     // not hex
+            "[nope]",     // not an address
+            "[1.2.3.4]",  // IPv4 in brackets — curl and browsers reject it
+            "[::1::2]",   // two elisions
         ] {
             assert!(validate_hostname(bad).is_err(), "{bad} should be rejected");
         }
@@ -560,11 +584,35 @@ mod tests {
 
     #[test]
     fn resolve_hostname_treats_empty_flag_as_unset() {
-        assert_eq!(resolve_hostname(Some(String::new())).unwrap(), None);
-        assert_eq!(resolve_hostname(Some("   ".to_string())).unwrap(), None);
+        // An empty flag cancels an inherited $DPCP_HOSTNAME rather than falling
+        // through to it.
+        let env = || Some("inherited.ts.net".to_string());
+        for empty in ["", "   "] {
+            let got = resolve_hostname_from(Some(empty.to_string()), env()).unwrap();
+            assert_eq!(got, None, "{empty:?} should cancel the env var");
+        }
         assert_eq!(
-            resolve_hostname(Some(" foo.ts.net ".to_string())).unwrap(),
+            resolve_hostname_from(Some(" foo.ts.net ".to_string()), None).unwrap(),
             Some("foo.ts.net".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_hostname_fails_on_bad_flag_but_degrades_on_bad_env() {
+        let bad = "http://box".to_string();
+        // Explicit and deliberate: fail loudly.
+        assert!(resolve_hostname_from(Some(bad.clone()), None).is_err());
+        // Inherited from a shell profile: a display-only typo must not stop
+        // `dpcp allocate` from allocating.
+        assert_eq!(resolve_hostname_from(None, Some(bad)).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_hostname_falls_back_to_env() {
+        assert_eq!(
+            resolve_hostname_from(None, Some("box.ts.net".to_string())).unwrap(),
+            Some("box.ts.net".to_string())
+        );
+        assert_eq!(resolve_hostname_from(None, None).unwrap(), None);
     }
 }

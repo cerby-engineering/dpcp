@@ -168,9 +168,24 @@ hostname set, both keep their previous form (`http://127.0.0.1:8081/` and a
 bare `5432`).
 
 `--hostname <host>` overrides the variable for a single invocation, and
-`--hostname ""` ignores an inherited one. The value must be a bare host: letters,
-digits, `.` and `-`, with no scheme, port or path. An IPv6 literal is written
-bracketed, `[fd7a:115c:a1e0::1]`.
+`--hostname ""` ignores an inherited one. The value must be a bare host:
+letters, digits, `.`, `-` and `_`, with no scheme, port or path. An IPv6
+literal is written bracketed, `[fd7a:115c:a1e0::1]`.
+
+An invalid `--hostname` is an error, since passing it is deliberate. An invalid
+`$DPCP_HOSTNAME` only warns on stderr and falls back to loopback — a typo in a
+shell profile shouldn't stop `dpcp allocate` from allocating over a setting
+that affects printed text alone:
+
+```sh
+$ DPCP_HOSTNAME=http://my-box.ts.net dpcp allocate .
+warning: ignoring $DPCP_HOSTNAME, falling back to loopback — hostname must be a bare host, not a URL: http://my-box.ts.net
+/home/me/myproject
+  myservice: http://127.0.0.1:8081/
+```
+
+`release` and `gc` print no URLs, so they accept `--hostname` (it's a global
+flag, convenient for scripts that pass it uniformly) and ignore it.
 
 This affects **printed output only**. The `<NAME>_URL` written to `.dpcp.env`
 always stays on loopback, because it's consumed by processes running on the
