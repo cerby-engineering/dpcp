@@ -104,6 +104,22 @@ stays as-is — it's justified on both sides: the slash helps terminals
 linkify, and its absence lets consumers write `${WEBAPP_URL}/api/foo` without
 a double slash.
 
+**Bare-port services are included.** When `DPCP_HOSTNAME` is set, a service
+with no `protocol:` renders as `hostname:port` rather than a bare integer, so
+a `psql`/`redis-cli` invocation can be copied straight out of the output:
+
+```
+$ dpcp list
+/home/ec2-user/c3
+  webapp:   http://earlye-herd-claude.raccoon-wyrm.ts.net:3001/
+  postgres: earlye-herd-claude.raccoon-wyrm.ts.net:5432
+```
+
+Derived from the decisions above, not separately asked: when `DPCP_HOSTNAME`
+is **unset**, bare-port services keep printing a bare integer (`5432`), not
+`127.0.0.1:5432`. Unset means today's behavior everywhere. Non-HTTP services
+have no `_URL` var in `.dpcp.env`, only `_PORT`, so nothing changes there.
+
 ## Open questions
 
 
@@ -119,3 +135,4 @@ a double slash.
 - Q: Where should the display hostname be configured? — A: **`DPCP_HOSTNAME` env var**, plus a `--hostname` per-invocation override. It's host-level, not project-level: `dpcp.yml` is committed to git, and `dpcp list` never reads it. Auto-detection rejected as ambiguous on multi-homed hosts.
 - Q: Does "possibly per port" survive the display-only scope? — A: **Dropped, YAGNI** — might return, but no concrete case yet. The real near-case is a per-port *opt-out* for loopback-only services, which would cost a sqlite column because `cmd_list` reads the DB, not `dpcp.yml`.
 - Q: Fix the `127.0.0.1` vs `localhost` split too? — A: **Yes** — change `.dpcp.env`'s `_URL` to `127.0.0.1`, removing the `::1` resolution ambiguity that `port_is_bound` already guards against. Trailing-slash difference stays; it's justified on both sides.
+- Q: Should `DPCP_HOSTNAME` affect services with no `protocol:` (currently bare port numbers)? — A: **Yes**, render them as `hostname:port` so the connection string is copyable. (Overrode the recommendation to leave them bare.) Unset still prints a bare integer.
