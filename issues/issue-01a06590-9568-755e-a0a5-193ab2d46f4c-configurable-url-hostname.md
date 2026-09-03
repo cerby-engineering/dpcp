@@ -88,10 +88,24 @@ project fact, unlike the box's name). Its cost is a new sqlite column, since
 the schema change the display-only scope avoids. Not worth it without a
 concrete instance.
 
+**Fold in: normalize `.dpcp.env` from `localhost` to `127.0.0.1`.** Not the
+remote hostname — just the loopback literal, so both channels agree on their
+default.
+
+`port_is_bound` already documents (`src/main.rs:167`) that IPv4 and IPv6
+loopback are distinct addresses, and probes all four of `0.0.0.0`,
+`127.0.0.1`, `::`, `::1` because a squatter on one isn't caught via the
+other. Writing `localhost` into `.dpcp.env` reintroduces exactly that
+ambiguity — it resolves to `::1` or `127.0.0.1` by resolver order, and a
+service bound IPv4-only won't answer on `::1`.
+
+The *trailing slash* difference (`…:8080/` printed, `…:3001` in the env file)
+stays as-is — it's justified on both sides: the slash helps terminals
+linkify, and its absence lets consumers write `${WEBAPP_URL}/api/foo` without
+a double slash.
+
 ## Open questions
 
-- Is the existing `127.0.0.1` (display) vs `localhost` (env file) split
-  intentional, or a bug to fold into this change?
 
 ## Related
 
@@ -104,3 +118,4 @@ concrete instance.
 - Q: Should the configurable hostname change `.dpcp.env`'s `_URL` vars, or only terminal output? — A: **Display only.** `_URL` stays `localhost`; the two channels have different audiences, and `env:` interpolation already covers the case for a custom URL in the env file.
 - Q: Where should the display hostname be configured? — A: **`DPCP_HOSTNAME` env var**, plus a `--hostname` per-invocation override. It's host-level, not project-level: `dpcp.yml` is committed to git, and `dpcp list` never reads it. Auto-detection rejected as ambiguous on multi-homed hosts.
 - Q: Does "possibly per port" survive the display-only scope? — A: **Dropped, YAGNI** — might return, but no concrete case yet. The real near-case is a per-port *opt-out* for loopback-only services, which would cost a sqlite column because `cmd_list` reads the DB, not `dpcp.yml`.
+- Q: Fix the `127.0.0.1` vs `localhost` split too? — A: **Yes** — change `.dpcp.env`'s `_URL` to `127.0.0.1`, removing the `::1` resolution ambiguity that `port_is_bound` already guards against. Trailing-slash difference stays; it's justified on both sides.
