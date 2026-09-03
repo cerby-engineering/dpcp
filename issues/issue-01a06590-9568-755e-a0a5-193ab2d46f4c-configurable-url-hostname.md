@@ -75,6 +75,19 @@ Auto-detection (`tailscale status`, `hostname -f`) was considered and
 rejected: on a multi-homed host there's no principled way to pick between the
 LAN name, the Tailscale name and public DNS, and it's awkward to turn off.
 
+**Per-port hostnames: dropped (YAGNI).** One hostname applies to every
+service. May return later, so the analysis is kept here:
+
+No case surfaced for two services on one box wanting *different* names. The
+nearest real case is the opposite — a service that isn't reachable remotely
+at all (an `http` admin panel bound loopback-only), where printing the
+Tailscale URL would be a lie. That's a per-port **opt-out**, not a per-port
+hostname, and it would belong in `dpcp.yml` ("binds loopback only" is a
+project fact, unlike the box's name). Its cost is a new sqlite column, since
+`cmd_list` reads the database rather than any `dpcp.yml` — which is exactly
+the schema change the display-only scope avoids. Not worth it without a
+concrete instance.
+
 ## Open questions
 
 - Is the existing `127.0.0.1` (display) vs `localhost` (env file) split
@@ -90,3 +103,4 @@ LAN name, the Tailscale name and public DNS, and it's awkward to turn off.
 
 - Q: Should the configurable hostname change `.dpcp.env`'s `_URL` vars, or only terminal output? — A: **Display only.** `_URL` stays `localhost`; the two channels have different audiences, and `env:` interpolation already covers the case for a custom URL in the env file.
 - Q: Where should the display hostname be configured? — A: **`DPCP_HOSTNAME` env var**, plus a `--hostname` per-invocation override. It's host-level, not project-level: `dpcp.yml` is committed to git, and `dpcp list` never reads it. Auto-detection rejected as ambiguous on multi-homed hosts.
+- Q: Does "possibly per port" survive the display-only scope? — A: **Dropped, YAGNI** — might return, but no concrete case yet. The real near-case is a per-port *opt-out* for loopback-only services, which would cost a sqlite column because `cmd_list` reads the DB, not `dpcp.yml`.
