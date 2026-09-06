@@ -6,9 +6,9 @@ When dpcp runs on a remote machine the user reaches over SSH (or Tailscale),
 the URLs it prints are hardcoded to loopback, so they aren't clickable from
 the machine the user is actually sitting at.
 
-Example: running dpcp on `earlye-herd-claude` prints
+Example: running dpcp on a remote box prints
 `http://127.0.0.1:8080/`, but the user needs
-`http://earlye-herd-claude.raccoon-wyrm.ts.net:8080/`.
+`http://my-box.example.ts.net:8080/`.
 
 Grilled 2026-09-03; the design below is settled. See
 [ADR 0001](../docs/adr/0001-host-level-config-outside-dpcp-yml.md) for the
@@ -43,7 +43,7 @@ per-invocation override. Unset means today's behavior, unchanged.
 
 ```sh
 # ~/.bashrc on the remote host
-export DPCP_HOSTNAME=earlye-herd-claude.raccoon-wyrm.ts.net
+export DPCP_HOSTNAME=my-box.example.ts.net
 ```
 
 The hostname is a property of *the box dpcp runs on*, not of the project:
@@ -66,9 +66,9 @@ set, so a `psql`/`redis-cli` connection string can be copied straight out:
 
 ```
 $ dpcp list
-/home/ec2-user/c3
-  webapp: http://earlye-herd-claude.raccoon-wyrm.ts.net:3001/
-  postgres: earlye-herd-claude.raccoon-wyrm.ts.net:5432
+/home/me/myproject
+  webapp: http://my-box.example.ts.net:3001/
+  postgres: my-box.example.ts.net:5432
 ```
 
 With no hostname set they keep printing a bare integer (`5432`), not
