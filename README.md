@@ -44,7 +44,7 @@ env:                        # optional; arbitrary extra vars written to .dpcp.en
 |---|---|---|
 | `ports` | yes | Map of service name → port config |
 | `ports.<name>.default-port` | yes | Starting port; dpcp increments if taken |
-| `ports.<name>.protocol` | no | `http` or `https` — writes `http://127.0.0.1:<port>/` instead of a bare number |
+| `ports.<name>.protocol` | no | `http` or `https` — emits a `<NAME>_URL` alongside `<NAME>_PORT`, and prints a full URL instead of a bare number |
 | `ports.<name>.env-name` | no | Override the env var name (default: `<NAME>_PORT`) |
 | `env` | no | Map of extra env var name → value, written to `.dpcp.env` |
 | `env-file` | no | Path to write `.dpcp.env` (default: `<workdir>/.dpcp.env`) |
@@ -78,6 +78,9 @@ dpcp release  <workdir>
 dpcp list
 dpcp gc
 ```
+
+`allocate` and `list` accept `--hostname <host>`, which affects their printed
+output; see [Remote hosts](#remote-hosts) below.
 
 ### allocate
 
@@ -140,6 +143,85 @@ Removes allocations for working directories whose paths no longer
 exist on disk. Run this periodically if you delete working directories
 without calling `release`. (For example, upon exiting a `claude
 --worktree` session).
+
+## Remote hosts
+
+By default dpcp prints loopback URLs — `http://127.0.0.1:8080/`. When dpcp
+runs on a box you reach over SSH or Tailscale, those aren't clickable from
+the machine you're sitting at. Set `DPCP_HOSTNAME` on that box:
+
+```sh
+# ~/.bashrc on the remote host
+export DPCP_HOSTNAME=my-box.example.ts.net
+```
+
+```sh
+$ dpcp list
+/home/me/myproject
+  myservice: http://my-box.example.ts.net:8081/
+  postgres: my-box.example.ts.net:5432
+```
+
+Services with a `protocol:` render as full URLs; services without one render
+as `host:port` so the connection string can be copied straight out. With no
+hostname set, both keep their previous form (`http://127.0.0.1:8081/` and a
+bare `5432`).
+
+`--hostname <host>` overrides the variable for a single invocation, and
+`--hostname ""` ignores an inherited one. The value must be a bare host:
+letters, digits, `.`, `-` and `_`, with no scheme, port or path. An IPv6
+literal is written bracketed, `[fd7a:115c:a1e0::1]`.
+
+A bare IPv6 address is bracketed automatically, so
+`--hostname "$(tailscale ip -6)"` works as written.
+
+An invalid value — from either source — warns on stderr and falls back to the
+default output rather than failing. The hostname affects printed text alone, so
+neither a typo in a shell profile nor a command substitution that produced
+something unexpected should stop `dpcp allocate` from allocating:
+
+```sh
+$ DPCP_HOSTNAME=http://my-box.ts.net dpcp allocate .
+warning: ignoring $DPCP_HOSTNAME, falling back to default output — hostname must be a bare host, not a URL: http://my-box.ts.net
+/home/me/myproject
+  myservice: http://127.0.0.1:8081/
+```
+
+`release` and `gc` print no URLs, so they accept `--hostname` (it's a global
+flag, convenient for scripts that pass it uniformly) and ignore it.
+
+**If a script parses dpcp's output**, note that setting `DPCP_HOSTNAME` in a
+shell profile changes it for every caller on that box: a protocol-less service
+goes from a bare `5432` to `box.ts.net:5432`. Pass `--hostname ""` in scripts
+that read the port back, or read `.dpcp.env`, which never carries the
+hostname.
+
+This affects **printed output only**. The `<NAME>_URL` written to `.dpcp.env`
+always stays on loopback, because it's consumed by processes running on the
+dpcp host itself, where routing out to a public name and back would be slower
+and would fail outright from inside a container. If a project needs a fixed
+non-loopback URL in the env file, write one with
+[`env:` interpolation](#dpcpyml) — note that this hardcodes the hostname in
+`dpcp.yml`, so it suits a shared name like `app.cerby-local.com`, not a
+per-machine one. `${DPCP_HOSTNAME}` is not available to interpolation.
+
+The hostname is deliberately *not* a `dpcp.yml` field: `dpcp.yml` is
+committed to the repo, and the reachable name of a machine is a property of
+that machine, not of the project. See
+[ADR 0001](docs/adr/0001-host-level-config-outside-dpcp-yml.md).
+
+### `_URL` now uses `127.0.0.1`, not `localhost` (0.2.0)
+
+Separately from the above, `<NAME>_URL` in `.dpcp.env` changed from
+`http://localhost:<port>` to `http://127.0.0.1:<port>`, so it matches what
+dpcp has always printed and avoids `localhost` resolving to `::1` on a host
+whose service is bound IPv4-only.
+
+**This is a breaking change if anything matches the value exactly** — an OAuth
+redirect URI registered as `http://localhost:3001/callback`, a CORS origin
+allowlist, or a cookie domain check. Re-running `dpcp allocate` rewrites
+`.dpcp.env`, so add the `127.0.0.1` form wherever the `localhost` one is
+registered.
 
 ## Wiring up a bare-metal application
 
