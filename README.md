@@ -13,8 +13,20 @@ across projects.
 
 ## Install
 
+Needs the Rust toolchain. Install it from [rustup.rs](https://rustup.rs) if
+`cargo` isn't already on your `PATH`.
+
 ```sh
 cargo install --path .
+```
+
+`cargo install` puts the binary in `~/.cargo/bin`, which has to be on your
+`PATH` or the install succeeds and `dpcp` still isn't found. rustup's
+installer offers to add it to your shell profile; if you declined that, or
+installed cargo some other way, add it yourself:
+
+```sh
+export PATH="$PATH:$HOME/.cargo/bin"
 ```
 
 ## dpcp.yml
