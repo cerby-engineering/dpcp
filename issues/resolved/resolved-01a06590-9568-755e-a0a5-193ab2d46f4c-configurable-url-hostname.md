@@ -67,7 +67,7 @@ set, so a `psql`/`redis-cli` connection string can be copied straight out:
 ```
 $ dpcp list
 /home/me/myproject
-  webapp:   http://my-box.example.ts.net:3001/
+  webapp: http://my-box.example.ts.net:3001/
   postgres: my-box.example.ts.net:5432
 ```
 
@@ -127,11 +127,39 @@ display-only scope avoids. Not worth it without a concrete instance.
 `ServiceRequest::from_spec` (`src/main.rs:31`, the `name:port[:scheme]` CLI
 form) needs **no** change — the hostname is not per-service.
 
-### Minor, resolve during implementation
+### Minor, resolved during implementation
 
-- Should `--hostname ""` explicitly disable an inherited `DPCP_HOSTNAME`?
-- Reject a value that already contains `://` or a `:port` suffix, rather than
-  emitting `http://http://foo:3001/`?
+- `--hostname ""` does cancel an inherited `DPCP_HOSTNAME`.
+- Values are validated against a host charset allowlist, not a blocklist, and
+  a bad value **warns and falls back** rather than failing — a display-only
+  setting must not stop `dpcp allocate` from allocating.
+
+### Added during implementation, not in the original design
+
+Five rounds of self-review surfaced these; all are recorded in the commit
+messages on the branch:
+
+- Bare IPv6 addresses are bracketed automatically, so
+  `--hostname "$(tailscale ip -6)"` works as written.
+- Rejected as unreachable: wildcard binds (`0.0.0.0`, `::`), hyphen-edged
+  labels (RFC 1123), empty labels, and hosts with no alphanumeric character.
+- `_` is allowed in the charset (compose aliases, `/etc/hosts` entries).
+- Version bumped to 0.2.0 to signal the `_URL` break.
+
+### Declined
+
+- Per-port hostnames (YAGNI, as decided in the grill).
+- Leaving a bare IPv6 unbracketed in the `host:port` arm so it pastes into
+  `psql -h`: that renders `fd7a::1:5432`, where the port isn't separable
+  from the address.
+- Erroring on `--hostname` for `release`/`gc`, which ignore it.
+
+## Found but not fixed (out of scope)
+
+`env-name` is treated as a *prefix*, not a name: `env-name: MY_SVC_PORT` on
+an `http` service emits `MY_SVC_PORT_PORT` and `MY_SVC_PORT_URL`, while
+`README.md` documents `MY_SVC_PORT`. Pre-existing (`env_prefix()`), verified
+against the built binary, and untouched by this change — worth its own issue.
 
 ## Related
 

@@ -76,6 +76,10 @@ fn load_dpcp_yml(dir: &Path) -> Result<(Vec<ServiceRequest>, Option<PathBuf>, st
 #[derive(Parser)]
 #[command(name = "dpcp", about = "Dynamic Port Configuration Protocol — host-central port broker for working directories")]
 struct Cli {
+    /// Hostname to use in printed URLs, e.g. a Tailscale name when dpcp runs on a
+    /// remote box. Defaults to $DPCP_HOSTNAME; pass an empty value to ignore it.
+    #[arg(long, global = true)]
+    hostname: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -193,10 +197,111 @@ fn next_free_port(conn: &Connection, start_port: u16) -> Result<u16> {
     }
 }
 
-fn service_display(port: u16, scheme: Option<&str>) -> String {
-    match scheme {
-        Some(s @ ("http" | "https")) => format!("{s}://127.0.0.1:{port}/"),
-        _ => port.to_string(),
+/// Render an allocation for the terminal. `hostname` is the display host from
+/// `--hostname`/`$DPCP_HOSTNAME`; without one, URLs fall back to loopback and
+/// port-only services stay bare numbers.
+fn service_display(port: u16, scheme: Option<&str>, hostname: Option<&str>) -> String {
+    match (scheme, hostname) {
+        (Some(s @ ("http" | "https")), host) => {
+            format!("{s}://{}:{port}/", host.unwrap_or("127.0.0.1"))
+        }
+        (_, Some(host)) => format!("{host}:{port}"),
+        (_, None) => port.to_string(),
+    }
+}
+
+/// Require a display hostname to be a bare host. dpcp supplies the scheme, port
+/// and trailing slash itself, so `http://foo:3001` would render as
+/// `http://http://foo:3001:8080/`. Characters outside the host charset are
+/// rejected too: `http://foo?x:8080/` is a valid URL that a terminal linkifies
+/// to host `foo` on port 80, which fails silently rather than loudly.
+fn validate_hostname(host: &str) -> Result<()> {
+    if host.contains("://") {
+        anyhow::bail!("hostname must be a bare host, not a URL: {host}");
+    }
+    // A bracketed IPv6 literal is the one form allowed to contain colons; it
+    // also renders correctly as-is, since `[::1]:8080` is the standard form.
+    if host.starts_with('[') || host.ends_with(']') {
+        let addr = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .and_then(|inner| inner.parse::<std::net::Ipv6Addr>().ok())
+            .with_context(|| format!("hostname is not a valid bracketed IPv6 literal: {host}"))?;
+        if addr.is_unspecified() {
+            anyhow::bail!("hostname must be reachable, not a wildcard bind address: {host}");
+        }
+        return Ok(());
+    }
+    if host.contains(':') {
+        anyhow::bail!("hostname must not include a port (bracket IPv6 as [::1]): {host}");
+    }
+    // `0.0.0.0` is a plausible copy-paste out of a listen config, but a
+    // wildcard bind address is not a name anything can connect to.
+    if host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_unspecified()) {
+        anyhow::bail!("hostname must be reachable, not a wildcard bind address: {host}");
+    }
+    let host_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+    if !host.chars().all(host_char) {
+        anyhow::bail!("hostname may only contain letters, digits, '.', '-' and '_': {host}");
+    }
+    // A single trailing dot is the legal root form of an FQDN; anything else
+    // empty between the dots is a typo, as is a host with nothing to resolve.
+    let labels = host.strip_suffix('.').unwrap_or(host);
+    if labels.is_empty() || labels.split('.').any(|l| l.is_empty()) {
+        anyhow::bail!("hostname has an empty label: {host}");
+    }
+    // RFC 1123: a label may contain hyphens but must not begin or end with one.
+    let hyphen_edged = |l: &str| l.starts_with('-') || l.ends_with('-');
+    if labels.split('.').any(hyphen_edged) {
+        anyhow::bail!("hostname label must not start or end with '-': {host}");
+    }
+    if !host.chars().any(|c| c.is_ascii_alphanumeric()) {
+        anyhow::bail!("hostname must contain at least one letter or digit: {host}");
+    }
+    Ok(())
+}
+
+/// Bracket a bare IPv6 address so `--hostname "$(tailscale ip -6)"` works —
+/// `fd7a::1` only renders as a usable URL once it's `[fd7a::1]`.
+fn normalize_hostname(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// Resolve the display hostname from the `--hostname` flag, else
+/// `$DPCP_HOSTNAME`. An empty or whitespace-only value means "no hostname",
+/// so `--hostname ""` cancels an inherited `$DPCP_HOSTNAME`.
+fn resolve_hostname(flag: Option<String>) -> Option<String> {
+    resolve_hostname_from(flag, std::env::var("DPCP_HOSTNAME").ok())
+}
+
+/// The env-independent half of [`resolve_hostname`], so both branches are
+/// testable without mutating the process environment.
+///
+/// A bad value warns on stderr and falls back to the default output rather
+/// than failing.
+/// The hostname affects printed text alone, so neither a typo in a shell
+/// profile nor a `--hostname "$(tailscale ip -6)"` that produced something
+/// unexpected should stop `dpcp allocate` from allocating.
+fn resolve_hostname_from(flag: Option<String>, env: Option<String>) -> Option<String> {
+    let (source, raw) = match (flag, env) {
+        (Some(h), _) => ("--hostname", h),
+        (None, Some(h)) => ("$DPCP_HOSTNAME", h),
+        (None, None) => return None,
+    };
+    let host = normalize_hostname(raw.trim());
+    if host.is_empty() {
+        return None;
+    }
+    match validate_hostname(&host) {
+        Ok(()) => Some(host),
+        Err(e) => {
+            eprintln!("warning: ignoring {source}, falling back to default output — {e}");
+            None
+        }
     }
 }
 
@@ -228,6 +333,7 @@ fn cmd_allocate(
     requests: &[ServiceRequest],
     env_file: Option<&Path>,
     extra_env: &std::collections::BTreeMap<String, String>,
+    hostname: Option<&str>,
 ) -> Result<()> {
     let workdir = workdir
         .canonicalize()
@@ -286,7 +392,7 @@ fn cmd_allocate(
         }
         if matches!(req.scheme.as_deref(), Some("http" | "https")) {
             let scheme = req.scheme.as_deref().unwrap();
-            let url = format!("{scheme}://localhost:{port}");
+            let url = format!("{scheme}://127.0.0.1:{port}");
             lines.push(format!("{prefix}_URL={url}"));
             var_lookup.insert(format!("{prefix}_URL"), url);
         }
@@ -310,7 +416,7 @@ fn cmd_allocate(
     println!("{workdir_str}");
     for req in requests {
         let port = assignments[&req.name];
-        println!("  {}: {}", req.name, service_display(port, req.scheme.as_deref()));
+        println!("  {}: {}", req.name, service_display(port, req.scheme.as_deref(), hostname));
     }
 
     Ok(())
@@ -329,7 +435,7 @@ fn cmd_release(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(glob: Option<&str>) -> Result<()> {
+fn cmd_list(glob: Option<&str>, hostname: Option<&str>) -> Result<()> {
     let resolved_glob: Option<String> = match glob {
         Some(".") => {
             let cwd = std::env::current_dir().context("failed to get current directory")?
@@ -363,7 +469,7 @@ fn cmd_list(glob: Option<&str>) -> Result<()> {
             println!("{workdir}");
             current_wt = workdir.clone();
         }
-        println!("  {service}: {}", service_display(*port, scheme.as_deref()));
+        println!("  {service}: {}", service_display(*port, scheme.as_deref(), hostname));
     }
     Ok(())
 }
@@ -408,10 +514,15 @@ fn main() -> Result<()> {
                 (reqs, None, std::collections::BTreeMap::new())
             };
             let effective_env_file = env_file.as_deref().or(yml_env_file.as_deref());
-            cmd_allocate(&workdir, &requests, effective_env_file, &extra_env)
+            let hostname = resolve_hostname(cli.hostname);
+            let hostname = hostname.as_deref();
+            cmd_allocate(&workdir, &requests, effective_env_file, &extra_env, hostname)
         }
         Commands::Release { workdir } => cmd_release(&workdir),
-        Commands::List { glob } => cmd_list(glob.as_deref()),
+        Commands::List { glob } => {
+            let hostname = resolve_hostname(cli.hostname);
+            cmd_list(glob.as_deref(), hostname.as_deref())
+        }
         Commands::Gc => cmd_gc(),
     }
 }
@@ -460,5 +571,104 @@ mod tests {
     fn interpolate_errors_on_unterminated_brace() {
         let lookup = HashMap::new();
         assert!(interpolate_env_value("${OOPS", &lookup).is_err());
+    }
+
+    #[test]
+    fn service_display_covers_scheme_and_hostname_combinations() {
+        let host = Some("box.ts.net");
+        let cases = [
+            (Some("http"), host, "http://box.ts.net:8080/"),
+            (Some("https"), host, "https://box.ts.net:8080/"),
+            (Some("http"), None, "http://127.0.0.1:8080/"),
+            (None, host, "box.ts.net:8080"),
+            (None, None, "8080"),
+        ];
+        for (scheme, hostname, expected) in cases {
+            assert_eq!(service_display(8080, scheme, hostname), expected);
+        }
+    }
+
+    #[test]
+    fn validate_hostname_accepts_bare_hosts_and_bracketed_ipv6() {
+        for good in [
+            "foo.ts.net",
+            "my-box",
+            "my_box.local", // '_' is common in compose aliases and /etc/hosts
+            "[::1]",
+            "[fd7a:115c:a1e0::1]",
+            "[::ffff:1.2.3.4]", // IPv4-mapped
+            "foo.ts.net.",      // trailing dot is the legal FQDN root form
+        ] {
+            assert!(validate_hostname(good).is_ok(), "{good} should be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_hostname_rejects_anything_that_would_corrupt_a_url() {
+        for bad in [
+            "http://foo", // scheme
+            "foo:3001",   // port
+            "foo/bar",    // path
+            "foo?x",      // query — would linkify as host `foo` on port 80
+            "foo#y",      // fragment
+            "my box",     // whitespace
+            "[]",         // empty IPv6 literal
+            "[nope]",     // not an address
+            "[1.2.3.4]",  // IPv4 in brackets — curl and browsers reject it
+            "[::1::2]",   // two elisions
+            "0.0.0.0",    // wildcard bind address, not a name
+            "[::]",
+            "-box", // RFC 1123: no hyphen at a label edge
+            "box-",
+            "foo.-bar.baz",
+            ".", // nothing to resolve
+            "..",
+            "-",
+            "_",
+            "foo..bar", // empty label
+        ] {
+            assert!(validate_hostname(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn resolve_hostname_treats_empty_flag_as_unset() {
+        // An empty flag cancels an inherited $DPCP_HOSTNAME rather than falling
+        // through to it.
+        let env = || Some("inherited.ts.net".to_string());
+        for empty in ["", "   "] {
+            let got = resolve_hostname_from(Some(empty.to_string()), env());
+            assert_eq!(got, None, "{empty:?} should cancel the env var");
+        }
+        assert_eq!(
+            resolve_hostname_from(Some(" foo.ts.net ".to_string()), None),
+            Some("foo.ts.net".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_hostname_degrades_to_loopback_on_a_bad_value() {
+        // Whatever the source: printing is not worth failing an allocation over.
+        let bad = "http://box".to_string();
+        assert_eq!(resolve_hostname_from(Some(bad.clone()), None), None);
+        assert_eq!(resolve_hostname_from(None, Some(bad)), None);
+    }
+
+    #[test]
+    fn resolve_hostname_falls_back_to_env() {
+        assert_eq!(
+            resolve_hostname_from(None, Some("box.ts.net".to_string())),
+            Some("box.ts.net".to_string())
+        );
+        assert_eq!(resolve_hostname_from(None, None), None);
+    }
+
+    #[test]
+    fn resolve_hostname_brackets_a_bare_ipv6_address() {
+        // `--hostname "$(tailscale ip -6)"` hands us an unbracketed address.
+        assert_eq!(
+            resolve_hostname_from(Some("fd7a:115c:a1e0::1".to_string()), None),
+            Some("[fd7a:115c:a1e0::1]".to_string())
+        );
     }
 }
